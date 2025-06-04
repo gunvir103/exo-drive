@@ -2,85 +2,143 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 import { z } from 'zod';
 
-// Define the schema for request validation
-const availabilityQuerySchema = z.object({
-  car_id: z.string().uuid(),
-  start_date: z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/, "Start date must be in YYYY-MM-DD format"),
-  end_date: z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/, "End date must be in YYYY-MM-DD format"),
+// Request schema for availability check
+const availabilityRequestSchema = z.object({
+  carId: z.string().uuid("Invalid car ID"),
+  startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Start date must be in YYYY-MM-DD format"),
+  endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "End date must be in YYYY-MM-DD format"),
 });
 
-// Define an interface for the car availability record
-interface CarAvailabilityRecord {
-  date: string;
-  status: 'available' | 'pending_confirmation' | 'booked' | 'maintenance' | string; // Added string for safety, Supabase might return other values
-}
-
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const queryParams = Object.fromEntries(searchParams.entries());
-
-  // Validate query parameters
-  const validationResult = availabilityQuerySchema.safeParse(queryParams);
-
-  if (!validationResult.success) {
-    return NextResponse.json({ error: 'Invalid query parameters', details: validationResult.error.flatten() }, { status: 400 });
-  }
-
-  const { car_id, start_date, end_date } = validationResult.data;
-
-  if (new Date(start_date) > new Date(end_date)) {
-    return NextResponse.json({ error: 'Start date cannot be after end date' }, { status: 400 });
-  }
-
   const supabase = createSupabaseServerClient(request.cookies as any);
-
+  
   try {
-    const { data: carAvailability, error } = await supabase
-      .from('car_availability')
-      .select('date, status')
-      .eq('car_id', car_id)
-      .gte('date', start_date)
-      .lte('date', end_date)
-      .order('date', { ascending: true });
+    // Parse query parameters
+    const searchParams = request.nextUrl.searchParams;
+    const carId = searchParams.get('carId');
+    const startDate = searchParams.get('startDate');
+    const endDate = searchParams.get('endDate');
 
-    if (error) {
-      console.error('Supabase error fetching car availability:', error);
-      return NextResponse.json({ error: 'Failed to fetch car availability', details: error.message }, { status: 500 });
-    }
-
-    // Process the data to create a list of all dates in the range
-    // and mark their availability.
-    const availabilityMap = new Map<string, string>();
-    carAvailability?.forEach((record: CarAvailabilityRecord) => {
-      if (record.date && record.status) {
-        availabilityMap.set(record.date, record.status);
-      }
+    // Validate input
+    const validationResult = availabilityRequestSchema.safeParse({
+      carId,
+      startDate,
+      endDate,
     });
 
-    const results: { date: string; available: boolean; status?: string }[] = [];
-    const currentDate = new Date(start_date);
-    const lastDate = new Date(end_date);
+    if (!validationResult.success) {
+      return NextResponse.json(
+        { error: 'Invalid request parameters', details: validationResult.error.flatten() },
+        { status: 400 }
+      );
+    }
 
-    while (currentDate <= lastDate) {
-      const dateString = currentDate.toISOString().split('T')[0];
-      const status = availabilityMap.get(dateString);
+    const { carId: validCarId, startDate: validStartDate, endDate: validEndDate } = validationResult.data;
 
-      // A date is unavailable if its status is 'pending_confirmation', 'booked', or 'maintenance'.
-      // If a date is not in our car_availability table, we assume it's 'available' by default.
-      const isAvailable = !status || status === 'available';
-      
-      results.push({
-        date: dateString,
-        available: isAvailable,
-        status: status || 'available', // Return the actual status or 'available' if not present
+    // Validate date range
+    const start = new Date(validStartDate);
+    const end = new Date(validEndDate);
+    
+    if (start > end) {
+      return NextResponse.json(
+        { error: 'Start date must be before or equal to end date' },
+        { status: 400 }
+      );
+    }
+
+    // Query car_availability table for the date range
+    const { data: availabilityData, error: availabilityError } = await supabase
+      .from('car_availability')
+      .select('date, status')
+      .eq('car_id', validCarId)
+      .gte('date', validStartDate)
+      .lte('date', validEndDate)
+      .order('date', { ascending: true });
+
+    if (availabilityError) {
+      console.error('Error fetching availability:', availabilityError);
+      return NextResponse.json(
+        { error: 'Failed to fetch availability data' },
+        { status: 500 }
+      );
+    }
+
+    // Create a map of dates to their availability status
+    const availabilityMap = new Map<string, string>();
+    if (availabilityData) {
+      availabilityData.forEach(record => {
+        availabilityMap.set(record.date, record.status);
       });
+    }
+
+    // Generate array of all dates in range with their availability
+    const availability: Array<{
+      date: string;
+      available: boolean;
+      status: string;
+    }> = [];
+    const currentDate = new Date(validStartDate);
+    
+    while (currentDate <= end) {
+      const dateStr = currentDate.toISOString().split('T')[0];
+      const status = availabilityMap.get(dateStr) || 'available';
+      
+      availability.push({
+        date: dateStr,
+        available: status === 'available',
+        status: status
+      });
+      
       currentDate.setDate(currentDate.getDate() + 1);
     }
 
-    return NextResponse.json(results, { status: 200 });
+    // Also fetch any existing bookings that might overlap (for extra safety)
+    const { data: bookings, error: bookingsError } = await supabase
+      .from('bookings')
+      .select('id, start_date, end_date, overall_status')
+      .eq('car_id', validCarId)
+      .gte('end_date', validStartDate)
+      .lte('start_date', validEndDate)
+      .not('overall_status', 'in', '["cancelled", "failed"]');
 
-  } catch (e: any) {
-    console.error('Error in car availability endpoint:', e);
-    return NextResponse.json({ error: 'An unexpected error occurred', details: e.message }, { status: 500 });
+    if (bookingsError) {
+      console.error('Error fetching bookings:', bookingsError);
+      // Continue without booking data - availability table is the source of truth
+    }
+
+    // Mark dates as unavailable if they have active bookings
+    if (bookings && bookings.length > 0) {
+      bookings.forEach(booking => {
+        const bookingStart = new Date(booking.start_date);
+        const bookingEnd = new Date(booking.end_date);
+        
+        availability.forEach(day => {
+          const dayDate = new Date(day.date);
+          if (dayDate >= bookingStart && dayDate <= bookingEnd) {
+            day.available = false;
+            day.status = 'booked';
+          }
+        });
+      });
+    }
+
+    return NextResponse.json({
+      carId: validCarId,
+      startDate: validStartDate,
+      endDate: validEndDate,
+      availability,
+      summary: {
+        totalDays: availability.length,
+        availableDays: availability.filter(d => d.available).length,
+        unavailableDays: availability.filter(d => !d.available).length
+      }
+    });
+
+  } catch (error: any) {
+    console.error('Error in availability endpoint:', error);
+    return NextResponse.json(
+      { error: 'Internal server error', details: error.message },
+      { status: 500 }
+    );
   }
 } 

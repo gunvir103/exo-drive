@@ -1,224 +1,328 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 import { z } from 'zod';
-import { cookies } from 'next/headers';
-
-// Schema for validating the bookingId parameter
-const paramsSchema = z.object({
-  bookingId: z.string().uuid("Invalid booking ID format"),
-});
-
-// Schema for validating the updatable booking fields
-// Making most fields optional as admin might update only a few at a time.
-const updateBookingBodySchema = z.object({
-  pickup_location: z.string().optional(),
-  dropoff_location: z.string().optional(),
-  pickup_time: z.string().optional(), // Consider validating as time string if specific format needed
-  dropoff_time: z.string().optional(), // Consider validating as time string
-  admin_notes: z.string().nullable().optional(),
-  overall_status: z.enum([
-    'pending_customer_action',
-    'pending_payment',
-    'pending_confirmation',
-    'confirmed',
-    'active_rental',
-    'completed',
-    'cancelled_by_customer',
-    'cancelled_by_admin',
-    'no_show',
-    'disputed'
-  ]).optional(),
-  payment_status: z.enum([
-    'pending_authorization',
-    'authorized',
-    'captured',
-    'failed',
-    'refunded',
-    'partially_refunded',
-    'chargeback'
-  ]).optional(),
-  contract_status: z.enum([
-    'pending_signature',
-    'signed',
-    'active',
-    'breached',
-    'terminated'
-  ]).optional(),
-  contract_document_url: z.string().url().nullable().optional(),
-  // Fields like total_price, car_id, customer_id, start_date, end_date are generally not updated this way.
-  // They might require a more complex process (e.g., re-booking, cancellation + new booking).
-}).strict(); // Use .strict() to prevent unknown fields
 
 export async function GET(
   request: NextRequest,
   { params }: { params: { bookingId: string } }
 ) {
-  const cookieStore = await cookies();
-  const supabase = createSupabaseServerClient(cookieStore);
-
-  // TODO: Implement admin role check (similar to the list bookings endpoint)
-  // Ensure only authenticated admins can access this route.
-
-  // Validate params
-  const validationResult = paramsSchema.safeParse(params);
-  if (!validationResult.success) {
-    return NextResponse.json(
-      { error: "Invalid booking ID", details: validationResult.error.flatten() },
-      { status: 400 }
-    );
-  }
-
-  const { bookingId } = validationResult.data;
-
+  const supabase = createSupabaseServerClient(request.cookies as any);
+  
   try {
-    const { data: booking, error } = await supabase
+    // Check admin authentication
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const { bookingId } = params;
+
+    // Fetch booking with all related data
+    const { data: booking, error: bookingError } = await supabase
       .from('bookings')
       .select(`
-        id,
-        created_at,
-        updated_at,
-        start_date,
-        end_date,
-        total_price,
-        currency,
-        discount_percentage,
-        discount_amount,
-        final_price,
-        security_deposit_amount,
-        pickup_location,
-        dropoff_location,
-        pickup_time,
-        dropoff_time,
-        customer_notes,
-        admin_notes,
-        overall_status,
-        payment_status,
-        contract_status,
-        contract_document_url,
-        customer_id,
-        car_id,
-        cars (*, car_images(*)),
-        customers (*),
-        booking_payments (*),
-        booking_secure_tokens (token, expires_at, used_at),
-        booking_audit_logs (*)
+        *,
+        customer:customers!bookings_customer_id_fkey (
+          id,
+          first_name,
+          last_name,
+          email,
+          phone,
+          address,
+          city,
+          state,
+          zip_code,
+          country,
+          drivers_license,
+          created_at
+        ),
+        car:cars!bookings_car_id_fkey (
+          id,
+          name,
+          slug,
+          model,
+          make,
+          year,
+          price_per_day,
+          main_image_url,
+          description
+        ),
+        payments (
+          id,
+          amount,
+          status,
+          payment_method,
+          transaction_id,
+          gateway_response,
+          created_at,
+          updated_at
+        ),
+        booking_events (
+          id,
+          event_type,
+          timestamp,
+          actor_type,
+          actor_id,
+          metadata,
+          created_at
+        ),
+        booking_secure_tokens (
+          id,
+          token,
+          created_at,
+          expires_at
+        ),
+        booking_media (
+          id,
+          media_type,
+          file_url,
+          file_name,
+          file_size,
+          uploaded_at,
+          uploaded_by_type,
+          uploaded_by_id,
+          metadata
+        ),
+        disputes (
+          id,
+          dispute_status,
+          reason,
+          amount,
+          provider_dispute_id,
+          created_at,
+          updated_at,
+          resolved_at
+        )
       `)
       .eq('id', bookingId)
       .single();
 
-    if (error) {
-      if (error.code === 'PGRST116') { // PostgREST error code for "Not found"
+    if (bookingError) {
+      if (bookingError.code === 'PGRST116') {
         return NextResponse.json({ error: 'Booking not found' }, { status: 404 });
       }
-      console.error('Error fetching booking details:', error);
+      console.error('Error fetching booking:', bookingError);
       return NextResponse.json(
-        { error: 'Failed to fetch booking details', details: error.message },
+        { error: 'Failed to fetch booking', details: bookingError.message },
         { status: 500 }
       );
     }
 
-    if (!booking) {
-      return NextResponse.json({ error: 'Booking not found' }, { status: 404 });
-    }
-    
-    // Potentially fetch related car_availability for the booking period if needed
-    // This might be useful for an admin view to see the calendar context
-    // const { data: availability, error: availabilityError } = await supabase
-    //   .from('car_availability')
-    //   .select('date, status')
-    //   .eq('car_id', booking.car_id)
-    //   .gte('date', booking.start_date)
-    //   .lte('date', booking.end_date)
-    //   .order('date', { ascending: true });
+    // Format the response
+    const formattedBooking = {
+      id: booking.id,
+      carId: booking.car_id,
+      car: booking.car,
+      customer: booking.customer ? {
+        ...booking.customer,
+        fullName: `${booking.customer.first_name} ${booking.customer.last_name}`.trim()
+      } : null,
+      startDate: booking.start_date,
+      endDate: booking.end_date,
+      totalPrice: booking.total_price,
+      currency: booking.currency,
+      securityDepositAmount: booking.security_deposit_amount,
+      overallStatus: booking.overall_status,
+      paymentStatus: booking.payment_status,
+      contractStatus: booking.contract_status,
+      pickupLocation: booking.pickup_location,
+      dropoffLocation: booking.dropoff_location,
+      notes: booking.notes,
+      adminNotes: booking.admin_notes,
+      createdAt: booking.created_at,
+      updatedAt: booking.updated_at,
+      bookingDays: booking.booking_days,
+      payments: booking.payments || [],
+      timeline: booking.booking_events?.sort((a: any, b: any) => 
+        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      ) || [],
+      secureTokens: booking.booking_secure_tokens || [],
+      media: booking.booking_media || [],
+      disputes: booking.disputes || [],
+      // Booking URLs
+      bookingUrl: booking.booking_secure_tokens?.[0]?.token 
+        ? `${process.env.NEXT_PUBLIC_BASE_URL}/booking/${booking.booking_secure_tokens[0].token}`
+        : null
+    };
 
-    // if (availabilityError) {
-    //   console.warn('Could not fetch car availability for booking:', availabilityError);
-    // }
+    return NextResponse.json(formattedBooking);
 
-    return NextResponse.json({ 
-      ...booking,
-      // car_availability_period: availability || [] 
-    });
-
-  } catch (e: any) {
-    console.error('Unexpected error in GET /api/admin/bookings/[bookingId]:', e);
+  } catch (error: any) {
+    console.error('Error in get booking endpoint:', error);
     return NextResponse.json(
-      { error: 'An unexpected error occurred', details: e.message },
+      { error: 'Internal server error', details: error.message },
       { status: 500 }
     );
   }
 }
 
-export async function PUT(
+
+
+// Update booking details
+export async function PATCH(
   request: NextRequest,
   { params }: { params: { bookingId: string } }
 ) {
-  const cookieStore = await cookies();
-  const supabase = createSupabaseServerClient(cookieStore);
-
-  // TODO: Implement admin role check. For now, we assume the route is protected by middleware or other means.
-  // const { data: { user }, error: authError } = await supabase.auth.getUser();
-  // if (authError || !user) {
-  //   return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  // }
-  // // Implement actual role check based on your user_roles table or claims
-  // const isAdmin = true; // Replace with actual role check
-  // if (!isAdmin) {
-  //   return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-  // }
-
-  // Validate bookingId from URL params
-  const paramsValidation = paramsSchema.safeParse(params);
-  if (!paramsValidation.success) {
-    return NextResponse.json(
-      { error: "Invalid booking ID", details: paramsValidation.error.flatten() },
-      { status: 400 }
-    );
-  }
-  const { bookingId } = paramsValidation.data;
-
-  let requestBody;
+  const supabase = createSupabaseServerClient(request.cookies as any);
+  
   try {
-    requestBody = await request.json();
-  } catch (e) {
-    return NextResponse.json({ error: 'Invalid JSON in request body' }, { status: 400 });
-  }
+    // Check admin authentication
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
 
-  const bodyValidation = updateBookingBodySchema.safeParse(requestBody);
-  if (!bodyValidation.success) {
-    return NextResponse.json(
-      { error: 'Invalid request body', details: bodyValidation.error.flatten() },
-      { status: 400 }
-    );
-  }
+    const { bookingId } = params;
+    const body = await request.json();
 
-  const updates = bodyValidation.data;
+    // Schema for updating booking
+    const updateBookingSchema = z.object({
+      notes: z.string().optional(),
+      adminNotes: z.string().optional(),
+      pickupLocation: z.string().optional(),
+      dropoffLocation: z.string().optional(),
+      startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      totalPrice: z.number().positive().optional(),
+      securityDepositAmount: z.number().nonnegative().optional(),
+      overallStatus: z.enum([
+        'pending_customer_action',
+        'pending_payment',
+        'pending_contract',
+        'contract_pending_signature',
+        'upcoming',
+        'active',
+        'post_rental',
+        'completed',
+        'cancelled',
+        'failed',
+        'disputed'
+      ]).optional(),
+      paymentStatus: z.enum([
+        'pending',
+        'authorized',
+        'paid',
+        'partially_paid',
+        'failed',
+        'refunded',
+        'partially_refunded'
+      ]).optional(),
+      contractStatus: z.enum([
+        'not_sent',
+        'sent',
+        'viewed',
+        'signed',
+        'expired',
+        'declined'
+      ]).optional()
+    });
 
-  if (Object.keys(updates).length === 0) {
-    return NextResponse.json(
-      { error: 'No update fields provided' }, 
-      { status: 400 }
-    );
-  }
+    const validationResult = updateBookingSchema.safeParse(body);
+    if (!validationResult.success) {
+      return NextResponse.json(
+        { error: 'Invalid request payload', details: validationResult.error.flatten() },
+        { status: 400 }
+      );
+    }
 
-  try {
-    // 1. Fetch existing booking to ensure it exists and potentially get old values for audit
-    const { data: existingBooking, error: fetchError } = await supabase
+    const updateData = validationResult.data;
+
+    // Get current booking data for comparison
+    const { data: currentBooking, error: fetchError } = await supabase
       .from('bookings')
-      .select('*') // Select all for audit comparison if needed, or specific fields
+      .select('*')
       .eq('id', bookingId)
       .single();
 
-    if (fetchError || !existingBooking) {
+    if (fetchError || !currentBooking) {
       return NextResponse.json({ error: 'Booking not found' }, { status: 404 });
     }
 
-    // 2. Update the booking
+    // If dates are being changed, verify availability
+    if (updateData.startDate || updateData.endDate) {
+      const newStartDate = updateData.startDate || currentBooking.start_date;
+      const newEndDate = updateData.endDate || currentBooking.end_date;
+
+      // Check availability for new dates
+      const { data: conflicts, error: availError } = await supabase
+        .from('car_availability')
+        .select('date')
+        .eq('car_id', currentBooking.car_id)
+        .gte('date', newStartDate)
+        .lte('date', newEndDate)
+        .in('status', ['booked', 'pending_confirmation'])
+        .neq('booking_id', bookingId); // Exclude current booking
+
+      if (availError) {
+        console.error('Error checking availability:', availError);
+        return NextResponse.json(
+          { error: 'Failed to check availability' },
+          { status: 500 }
+        );
+      }
+
+      if (conflicts && conflicts.length > 0) {
+        return NextResponse.json(
+          { 
+            error: 'Car not available for selected dates',
+            unavailableDates: conflicts.map(c => c.date)
+          },
+          { status: 409 }
+        );
+      }
+
+      // Update car_availability if dates changed
+      if (newStartDate !== currentBooking.start_date || newEndDate !== currentBooking.end_date) {
+        // Free up old dates
+        await supabase
+          .from('car_availability')
+          .update({ status: 'available' })
+          .eq('booking_id', bookingId);
+
+        // Mark new dates as booked
+        const dates = [];
+        const current = new Date(newStartDate);
+        const end = new Date(newEndDate);
+        
+        while (current <= end) {
+          dates.push({
+            car_id: currentBooking.car_id,
+            date: current.toISOString().split('T')[0],
+            status: 'booked',
+            booking_id: bookingId
+          });
+          current.setDate(current.getDate() + 1);
+        }
+
+        await supabase
+          .from('car_availability')
+          .upsert(dates, { onConflict: 'car_id,date' });
+      }
+    }
+
+    // Map field names from camelCase to snake_case
+    const dbUpdateData: any = {};
+    if (updateData.notes !== undefined) dbUpdateData.notes = updateData.notes;
+    if (updateData.adminNotes !== undefined) dbUpdateData.admin_notes = updateData.adminNotes;
+    if (updateData.pickupLocation !== undefined) dbUpdateData.pickup_location = updateData.pickupLocation;
+    if (updateData.dropoffLocation !== undefined) dbUpdateData.dropoff_location = updateData.dropoffLocation;
+    if (updateData.startDate !== undefined) dbUpdateData.start_date = updateData.startDate;
+    if (updateData.endDate !== undefined) dbUpdateData.end_date = updateData.endDate;
+    if (updateData.totalPrice !== undefined) dbUpdateData.total_price = updateData.totalPrice;
+    if (updateData.securityDepositAmount !== undefined) dbUpdateData.security_deposit_amount = updateData.securityDepositAmount;
+    if (updateData.overallStatus !== undefined) dbUpdateData.overall_status = updateData.overallStatus;
+    if (updateData.paymentStatus !== undefined) dbUpdateData.payment_status = updateData.paymentStatus;
+    if (updateData.contractStatus !== undefined) dbUpdateData.contract_status = updateData.contractStatus;
+
+    // Update the booking
     const { data: updatedBooking, error: updateError } = await supabase
       .from('bookings')
-      .update(updates)
+      .update({
+        ...dbUpdateData,
+        updated_at: new Date().toISOString()
+      })
       .eq('id', bookingId)
-      .select('*') // Return the updated record
+      .select()
       .single();
 
     if (updateError) {
@@ -229,143 +333,152 @@ export async function PUT(
       );
     }
 
-    // 3. Create an audit log entry (simplified)
-    // TODO: Get actual admin user ID once auth is in place
-    const adminUserId = 'ADMIN_USER_PLACEHOLDER'; // Replace with actual user ID from session/auth
-    const changesMade: Record<string, any> = {};
-    for (const key in updates) {
-      if (Object.prototype.hasOwnProperty.call(updates, key)) {
-        const typedKey = key as keyof typeof updates;
-        if (existingBooking[typedKey] !== updates[typedKey]) {
-          changesMade[typedKey] = {
-            old: existingBooking[typedKey],
-            new: updates[typedKey],
-          };
+    // Log the update event
+    const changedFields: any = {};
+    for (const key in dbUpdateData) {
+      if (currentBooking[key] !== dbUpdateData[key]) {
+        changedFields[key] = {
+          old: currentBooking[key],
+          new: dbUpdateData[key]
+        };
+      }
+    }
+
+    await supabase.from('booking_events').insert({
+      booking_id: bookingId,
+      event_type: 'admin_updated_booking',
+      timestamp: new Date().toISOString(),
+      actor_type: 'admin',
+      actor_id: user.id,
+      metadata: {
+        updated_fields: Object.keys(changedFields),
+        changes: changedFields,
+        admin_email: user.email
+      }
+    });
+
+    // Handle status-specific actions
+    if (updateData.overallStatus && updateData.overallStatus !== currentBooking.overall_status) {
+      // Log status change event
+      await supabase.from('booking_events').insert({
+        booking_id: bookingId,
+        event_type: 'booking_status_changed',
+        timestamp: new Date().toISOString(),
+        actor_type: 'admin',
+        actor_id: user.id,
+        metadata: {
+          from_status: currentBooking.overall_status,
+          to_status: updateData.overallStatus,
+          admin_email: user.email
         }
-      }
+      });
     }
 
-    if (Object.keys(changesMade).length > 0) {
-      const { error: auditError } = await supabase
-        .from('booking_audit_logs')
-        .insert({
-          booking_id: bookingId,
-          user_id: adminUserId, // This should be the admin's user_id
-          action: 'admin_update',
-          changed_fields: changesMade,
-          // details: 'Booking updated by admin' // Optional: more human-readable details
-        });
+    return NextResponse.json({
+      message: 'Booking updated successfully',
+      booking: updatedBooking
+    });
 
-      if (auditError) {
-        console.error('Failed to create audit log for booking update:', auditError);
-        // Non-critical error, so we don't fail the whole request, but log it.
-      }
-    }
-
-    // If status changed to 'confirmed', update car_availability
-    if (updates.overall_status === 'confirmed' && existingBooking.overall_status !== 'confirmed') {
-      const { error: availError } = await supabase
-        .from('car_availability')
-        .update({ status: 'booked' })
-        .eq('car_id', existingBooking.car_id)
-        .gte('date', existingBooking.start_date)
-        .lte('date', existingBooking.end_date)
-        .in('status', ['available', 'pending_confirmation']); // Only update if not already booked or in maintenance
-      if (availError) console.error('Error updating car_availability to booked:', availError); // Log but don't fail request
-    }
-
-    return NextResponse.json(updatedBooking);
-
-  } catch (e: any) {
-    console.error('Unexpected error in PUT /api/admin/bookings/[bookingId]:', e);
+  } catch (error: any) {
+    console.error('Error updating booking:', error);
     return NextResponse.json(
-      { error: 'An unexpected error occurred', details: e.message },
+      { error: 'Internal server error', details: error.message },
       { status: 500 }
     );
   }
 }
 
-// POST /api/admin/bookings/[bookingId]/cancel
-export async function POST(
-  request: NextRequest, // Keep request parameter even if not used, for consistent signature
+// Delete/Cancel booking
+export async function DELETE(
+  request: NextRequest,
   { params }: { params: { bookingId: string } }
 ) {
-  const cookieStore = await cookies();
-  const supabase = createSupabaseServerClient(cookieStore);
-  const adminUserId = 'ADMIN_USER_PLACEHOLDER'; // Replace with actual user ID
-
-  const paramsValidation = paramsSchema.safeParse(params);
-  if (!paramsValidation.success) {
-    return NextResponse.json({ error: "Invalid booking ID", details: paramsValidation.error.flatten()}, { status: 400 });
-  }
-  const { bookingId } = paramsValidation.data;
-
+  const supabase = createSupabaseServerClient(request.cookies as any);
+  
   try {
-    const { data: existingBooking, error: fetchError } = await supabase
+    // Check admin authentication
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const { bookingId } = params;
+    
+    // Parse cancellation reason from body
+    const body = await request.json().catch(() => ({}));
+    const reason = body.reason || 'Cancelled by admin';
+
+    // Get current booking status
+    const { data: currentBooking, error: fetchError } = await supabase
       .from('bookings')
-      .select('id, car_id, start_date, end_date, overall_status')
+      .select('overall_status, car_id, start_date, end_date')
       .eq('id', bookingId)
       .single();
 
-    if (fetchError || !existingBooking) {
-      return NextResponse.json({ error: 'Booking not found to cancel' }, { status: 404 });
+    if (fetchError || !currentBooking) {
+      return NextResponse.json({ error: 'Booking not found' }, { status: 404 });
     }
 
-    if (existingBooking.overall_status === 'cancelled_by_admin') {
-      return NextResponse.json({ message: 'Booking already cancelled by admin', booking: existingBooking }, { status: 200 });
-    }
-    if (existingBooking.overall_status === 'completed' || existingBooking.overall_status === 'active_rental') {
-        return NextResponse.json({ error: 'Cannot cancel booking that is active or completed'}, { status: 400 });
+    // Check if booking can be cancelled
+    if (['completed', 'cancelled'].includes(currentBooking.overall_status)) {
+      return NextResponse.json(
+        { error: `Cannot cancel booking with status: ${currentBooking.overall_status}` },
+        { status: 400 }
+      );
     }
 
-    // 1. Update booking status
+    // Update booking status to cancelled
     const { data: cancelledBooking, error: cancelError } = await supabase
       .from('bookings')
-      .update({ overall_status: 'cancelled_by_admin' })
+      .update({
+        overall_status: 'cancelled',
+        updated_at: new Date().toISOString()
+      })
       .eq('id', bookingId)
-      .select('*')
+      .select()
       .single();
 
-    if (cancelError || !cancelledBooking) {
+    if (cancelError) {
       console.error('Error cancelling booking:', cancelError);
-      return NextResponse.json({ error: 'Failed to cancel booking', details: cancelError?.message }, { status: 500 });
+      return NextResponse.json(
+        { error: 'Failed to cancel booking', details: cancelError.message },
+        { status: 500 }
+      );
     }
 
-    // 2. Update car_availability to 'available' for the booking period
-    // Only update if status was 'booked' or 'pending_confirmation'
-    const { error: availError } = await supabase
+    // Free up car availability
+    await supabase
       .from('car_availability')
       .update({ status: 'available' })
-      .eq('car_id', existingBooking.car_id)
-      .gte('date', existingBooking.start_date)
-      .lte('date', existingBooking.end_date)
-      .in('status', ['booked', 'pending_confirmation']); 
+      .eq('booking_id', bookingId);
 
-    if (availError) {
-      console.error('Error updating car_availability to available after cancellation:', availError);
-      // Log but don't fail the entire cancellation if this part fails, as booking is already cancelled.
-      // However, this could leave stale availability data.
-    }
-
-    // 3. Create audit log
-    const changesMade = { 
-        overall_status: { 
-            old: existingBooking.overall_status, 
-            new: 'cancelled_by_admin' 
-        }
-    };
-    await supabase.from('booking_audit_logs').insert({
-      booking_id: bookingId, 
-      user_id: adminUserId, 
-      action: 'admin_cancel', 
-      changed_fields: changesMade,
-      details: 'Booking cancelled by admin'
+    // Log cancellation event
+    await supabase.from('booking_events').insert({
+      booking_id: bookingId,
+      event_type: 'booking_cancelled',
+      timestamp: new Date().toISOString(),
+      actor_type: 'admin',
+      actor_id: user.id,
+      metadata: {
+        reason,
+        admin_email: user.email,
+        previous_status: currentBooking.overall_status
+      }
     });
 
-    return NextResponse.json({ message: 'Booking cancelled successfully', booking: cancelledBooking });
+    // TODO: Handle payment refunds if necessary
+    // This would depend on payment status and business rules
 
-  } catch (e: any) {
-    console.error('Unexpected error in POST (cancel booking):', e);
-    return NextResponse.json({ error: 'An unexpected error occurred during cancellation', details: e.message }, { status: 500 });
+    return NextResponse.json({
+      message: 'Booking cancelled successfully',
+      booking: cancelledBooking
+    });
+
+  } catch (error: any) {
+    console.error('Error cancelling booking:', error);
+    return NextResponse.json(
+      { error: 'Internal server error', details: error.message },
+      { status: 500 }
+    );
   }
 } 

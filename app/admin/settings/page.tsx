@@ -135,23 +135,31 @@ export default function AdminSettingsPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Dropbox Sign Integration</CardTitle>
-              <CardDescription>Configure your Dropbox Sign settings for digital contracts.</CardDescription>
+              <CardTitle>DocuSeal Integration</CardTitle>
+              <CardDescription>Configure your self-hosted DocuSeal settings for digital contracts.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="dropbox-sign-api-key">API Key</Label>
-                <Input id="dropbox-sign-api-key" defaultValue="..." type="password" />
+                <Label htmlFor="docuseal-instance-url">DocuSeal Instance URL</Label>
+                <Input id="docuseal-instance-url" defaultValue="https://docuseal.exodrive.com" placeholder="https://docuseal.yourdomain.com" />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="dropbox-sign-template-id">Contract Template ID</Label>
-                <Input id="dropbox-sign-template-id" defaultValue="..." />
+                <Label htmlFor="docuseal-api-key">API Token</Label>
+                <Input id="docuseal-api-key" defaultValue="..." type="password" placeholder="docuseal_api_..." />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="dropbox-sign-webhook">Webhook URL</Label>
+                <Label htmlFor="docuseal-template-id">Rental Agreement Template ID</Label>
+                <Input id="docuseal-template-id" defaultValue="..." placeholder="template_rental_v1" />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="docuseal-webhook-secret">Webhook Secret</Label>
+                <Input id="docuseal-webhook-secret" defaultValue="..." type="password" placeholder="webhook_secret_..." />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="docuseal-webhook">Webhook URL</Label>
                 <Input
-                  id="dropbox-sign-webhook"
-                  defaultValue="https://exodrive.com/api/webhooks/dropbox-sign"
+                  id="docuseal-webhook"
+                  defaultValue="https://exodrive.com/api/webhooks/docuseal"
                   readOnly
                 />
               </div>
