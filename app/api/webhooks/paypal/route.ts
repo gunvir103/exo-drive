@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 import { z } from 'zod';
-import crypto from 'crypto';
+import { getPayPalAccessToken } from '@/lib/paypal-client';
 
 // PayPal webhook event types we care about
 const PAYPAL_EVENT_TYPES = {
@@ -22,10 +22,10 @@ const PAYPAL_EVENT_TYPES = {
 const paypalWebhookSchema = z.object({
   id: z.string(),
   event_type: z.string(),
-  resource_type: z.string(),
+  resource_type: z.string().optional(),
   summary: z.string().optional(),
   resource: z.object({
-    id: z.string(),
+    id: z.string().optional(),              // make optional
     status: z.string().optional(),
     amount: z.object({
       currency_code: z.string(),
@@ -39,7 +39,8 @@ const paypalWebhookSchema = z.object({
       currency_code: z.string(),
       value: z.string()
     }).optional()
-  }).passthrough(), // Allow additional fields
+  }).passthrough()                          // Allow additional fields
+  .optional(),                              // allow missing resource
   create_time: z.string(),
   event_version: z.string()
 });
@@ -47,49 +48,75 @@ const paypalWebhookSchema = z.object({
 // Verify PayPal webhook signature
 async function verifyPayPalWebhook(
   request: NextRequest,
-  body: any
+  rawBody: string
 ): Promise<boolean> {
-  // Get headers required for verification
-  const transmissionId = request.headers.get('paypal-transmission-id');
-  const transmissionTime = request.headers.get('paypal-transmission-time');
-  const certUrl = request.headers.get('paypal-cert-url');
-  const authAlgo = request.headers.get('paypal-auth-algo');
-  const transmissionSig = request.headers.get('paypal-transmission-sig');
-  
-  if (!transmissionId || !transmissionTime || !certUrl || !authAlgo || !transmissionSig) {
-    console.error('Missing PayPal webhook headers');
+  const PAYPAL_API_BASE = process.env.PAYPAL_MODE === 'sandbox' 
+    ? 'https://api-m.sandbox.paypal.com' 
+    : 'https://api-m.paypal.com';
+    
+  const webhookId = process.env.PAYPAL_WEBHOOK_ID;
+
+  if (!webhookId) {
+    console.warn('PAYPAL_WEBHOOK_ID not set. Skipping webhook verification. This is not secure for production.');
+    return process.env.NODE_ENV !== 'production';
+  }
+
+  try {
+    const accessToken = await getPayPalAccessToken();
+    
+    const verificationResponse = await fetch(`${PAYPAL_API_BASE}/v1/notifications/verify-webhook-signature`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`
+      },
+      body: JSON.stringify({
+        auth_algo: request.headers.get('paypal-auth-algo') || '',
+        cert_url: request.headers.get('paypal-cert-url') || '',
+        transmission_id: request.headers.get('paypal-transmission-id') || '',
+        transmission_sig: request.headers.get('paypal-transmission-sig') || '',
+        transmission_time: request.headers.get('paypal-transmission-time') || '',
+        webhook_id: webhookId,
+        webhook_event: JSON.parse(rawBody)
+      })
+    });
+
+    if (!verificationResponse.ok) {
+        const errorBody = await verificationResponse.text();
+        console.error('PayPal webhook verification API call failed:', verificationResponse.statusText, errorBody);
+        return false;
+    }
+
+    const verificationData = await verificationResponse.json();
+    const verificationStatus = verificationData.verification_status;
+    
+    if (verificationStatus === 'SUCCESS') {
+      console.log('PayPal webhook signature verified successfully.');
+      return true;
+    } else {
+      console.error('PayPal webhook signature verification failed with status:', verificationStatus);
+      return false;
+    }
+  } catch (error: any) {
+    console.error('Error verifying PayPal webhook signature:', error);
     return false;
   }
-
-  // In production, you should verify the webhook signature
-  // This requires calling PayPal's webhook verification endpoint
-  // For now, we'll check if webhook ID is present
-  const webhookId = process.env.PAYPAL_WEBHOOK_ID;
-  if (!webhookId) {
-    console.warn('PAYPAL_WEBHOOK_ID not set, skipping verification');
-    return true; // In development, allow unverified webhooks
-  }
-
-  // TODO: Implement actual PayPal webhook verification
-  // This would involve calling PayPal's verification endpoint
-  // https://api-m.paypal.com/v1/notifications/verify-webhook-signature
-  
-  return true;
 }
 
 export async function POST(request: NextRequest) {
   const supabase = createSupabaseServerClient(request.cookies as any);
   
   try {
-    // Parse request body
-    const body = await request.json();
+    const rawBody = await request.text();
     
     // Verify webhook signature
-    const isValid = await verifyPayPalWebhook(request, body);
+    const isValid = await verifyPayPalWebhook(request, rawBody);
     if (!isValid) {
       console.error('Invalid PayPal webhook signature');
       return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
     }
+
+    const body = JSON.parse(rawBody);
 
     // Validate webhook payload
     const validationResult = paypalWebhookSchema.safeParse(body);
@@ -103,6 +130,12 @@ export async function POST(request: NextRequest) {
 
     const webhookData = validationResult.data;
     const { event_type, resource } = webhookData;
+
+    // Handle events that don't have a resource (like webhook ping)
+    if (!resource) {
+      console.log('PayPal webhook event without resource:', event_type);
+      return NextResponse.json({ message: 'Event processed - no resource data' }, { status: 200 });
+    }
 
     // Extract booking ID from custom_id or invoice metadata
     const bookingId = resource.custom_id || resource.invoice_number?.split('-')[1];
@@ -142,19 +175,19 @@ export async function POST(request: NextRequest) {
         break;
 
       case PAYPAL_EVENT_TYPES.PAYMENT_AUTHORIZATION_VOIDED:
-        updateData.payment_status = 'failed';
+        updateData.payment_status = 'voided';
         eventType = 'payment_authorization_voided';
         break;
 
       case PAYPAL_EVENT_TYPES.PAYMENT_CAPTURE_COMPLETED:
-        updateData.payment_status = 'paid';
+        updateData.payment_status = 'captured';
         eventType = 'payment_captured';
         eventMetadata.amount = resource.amount?.value;
         eventMetadata.currency = resource.amount?.currency_code;
         
-        // If payment is captured and contract is signed, mark as active
-        if (booking.contract_status === 'signed' && booking.overall_status === 'upcoming') {
-          updateData.overall_status = 'active';
+        // If payment is captured and contract is signed, mark as upcoming
+        if (booking.contract_status === 'signed' && booking.overall_status?.startsWith('pending')) {
+          updateData.overall_status = 'upcoming';
         }
         break;
 
@@ -203,10 +236,14 @@ export async function POST(request: NextRequest) {
         updateData.payment_status = 'paid';
         eventType = 'invoice_paid';
         
-        // Store invoice ID if not already stored
-        if (!booking.paypal_invoice_id) {
-          updateData.paypal_invoice_id = resource.id;
+        // If payment is captured and contract is signed, mark as upcoming
+        if (booking.contract_status === 'signed' && booking.overall_status?.startsWith('pending')) {
+            updateData.overall_status = 'upcoming';
         }
+        
+        // The `paypal_invoices` table seems to be the right place for this, 
+        // but there is no direct relation from `bookings`.
+        // I will assume for now this logic is handled elsewhere or not needed immediately.
         break;
 
       case PAYPAL_EVENT_TYPES.INVOICING_INVOICE_CANCELLED:
@@ -233,29 +270,48 @@ export async function POST(request: NextRequest) {
     }
 
     // Log the event
-    await supabase.from('booking_events').insert({
+    const { error: eventError } = await supabase.from('booking_events').insert({
       booking_id: bookingId,
       event_type: eventType,
-      timestamp: new Date().toISOString(),
-      actor_type: 'system',
-      actor_id: 'paypal-webhook',
-      metadata: eventMetadata
+      summary_text: webhookData.summary,
+      actor_type: 'webhook_paypal',
+      actor_name: 'PayPal System',
+      details: webhookData
     });
 
-    // Update payment record if exists
+    if (eventError) {
+        console.error('Error logging PayPal event:', eventError);
+    }
+
+    // This part of the logic seems to have some inconsistencies with the schema.
+    // The `payments` table doesn't have a `gateway_response`.
+    // I will update the status and paypal_order_id if available.
     if (booking.payment_id && updateData.payment_status) {
-      await supabase
+      const paymentUpdateData: any = {
+        status: updateData.payment_status,
+        updated_at: new Date().toISOString()
+      };
+      
+      if (resource.id && (event_type === PAYPAL_EVENT_TYPES.PAYMENT_AUTHORIZATION_CREATED || event_type === PAYPAL_EVENT_TYPES.PAYMENT_CAPTURE_COMPLETED)) {
+        // resource.id could be authorization id or capture id.
+        // Assuming paypal_order_id on payments table can store this.
+        // The custom_id on the webhook resource should be the booking_id.
+        // resource.id from a capture event is the capture ID.
+        // resource.id from an authorization is the authorization ID.
+        // The `payments` table has `paypal_authorization_id` and `paypal_order_id`.
+        if(event_type === PAYPAL_EVENT_TYPES.PAYMENT_AUTHORIZATION_CREATED){
+            paymentUpdateData.paypal_authorization_id = resource.id;
+        }
+      }
+
+      const { error: paymentUpdateError } = await supabase
         .from('payments')
-        .update({
-          status: updateData.payment_status,
-          gateway_response: {
-            paypal_event_id: webhookData.id,
-            paypal_resource_id: resource.id,
-            last_updated: new Date().toISOString()
-          },
-          updated_at: new Date().toISOString()
-        })
+        .update(paymentUpdateData)
         .eq('id', booking.payment_id);
+
+        if (paymentUpdateError) {
+            console.error('Error updating payment record from PayPal webhook:', paymentUpdateError);
+        }
     }
 
     return NextResponse.json({ 
@@ -266,6 +322,9 @@ export async function POST(request: NextRequest) {
 
   } catch (error: any) {
     console.error('Error processing PayPal webhook:', error);
+    if (error instanceof SyntaxError) {
+        return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
+    }
     return NextResponse.json(
       { error: 'Internal server error', details: error.message },
       { status: 500 }

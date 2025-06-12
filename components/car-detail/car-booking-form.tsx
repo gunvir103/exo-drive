@@ -17,6 +17,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
+import { usePayPalScriptReducer, PayPalButtons } from "@paypal/react-paypal-js";
 
 type DateAvailability = {
   date: string;
@@ -41,6 +42,7 @@ export function CarBookingForm({ carId, pricing, availability = [] }: BookingFor
   const [isLoading, setIsLoading] = useState(false)
   const [isSuccess, setIsSuccess] = useState(false)
   const [step, setStep] = useState(1)
+  const [showPayPalButtons, setShowPayPalButtons] = useState(false);
   const [formData, setFormData] = useState({
     firstName: "",
     lastName: "",
@@ -53,6 +55,7 @@ export function CarBookingForm({ carId, pricing, availability = [] }: BookingFor
   const bookingStartTimeRef = useRef<number>(Date.now())
   const { toast } = useToast()
   const isMobile = useMediaQuery("(max-width: 640px)")
+  const [{ isPending }] = usePayPalScriptReducer();
 
   // Calculate rental days and total price safely
   const days = startDate && endDate ? Math.max(1, differenceInDays(endDate, startDate) + 1) : 0
@@ -138,87 +141,81 @@ export function CarBookingForm({ carId, pricing, availability = [] }: BookingFor
       })
       return
     }
-
-    setIsLoading(true)
-
-    try {
-      // Prepare booking data
-      const bookingData = {
-        carId,
-        startDate: format(startDate, "yyyy-MM-dd"),
-        endDate: format(endDate, "yyyy-MM-dd"),
-        totalPrice,
-        depositAmount: deposit,
-        customer: {
-          firstName: formData.firstName,
-          lastName: formData.lastName,
-          email: formData.email,
-          phone: formData.phone,
+    
+    // If validation passes, show the PayPal buttons
+    setShowPayPalButtons(true);
+  }
+  
+  const createPayPalOrder = async (): Promise<string> => {
+    const response = await fetch('/api/bookings/create-paypal-order', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
         },
-      }
+        body: JSON.stringify({ amount: totalPrice }),
+    });
+    const order = await response.json();
+    if (!response.ok) {
+        toast({
+            title: "Error creating PayPal order",
+            description: order.error || "There was an issue initiating the payment.",
+            variant: "destructive",
+        });
+        throw new Error("Failed to create PayPal order");
+    }
+    return order.orderID;
+  };
 
-      import("@/lib/analytics/track-events").then(({ trackBookingInitiated }) => {
-        const carName = document.title.split('|')[0].trim() || "Exotic Car"; // Extract car name from page title
-        trackBookingInitiated(
-          carId,
-          carName,
-          days,
-          totalPrice
-        );
-      });
-
-      // In a real app, this would be an API call to create a booking
-      console.log("Booking data:", bookingData)
-
-      // Simulate API call
-      await new Promise((resolve) => setTimeout(resolve, 1500))
-
-      try {
-        const emailResponse = await fetch("/api/email/booking", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            customerName: `${formData.firstName} ${formData.lastName}`,
-            customerEmail: formData.email,
-            customerPhone: formData.phone,
-            carName: document.title.split('|')[0].trim() || "Exotic Car", // Extract car name from page title
-            startDate: format(startDate, "MMMM d, yyyy"),
-            endDate: format(endDate, "MMMM d, yyyy"),
-            days,
-            basePrice,
+  const onPayPalApprove = async (data: any): Promise<void> => {
+    setIsLoading(true);
+    try {
+        const bookingDetails = {
+            carId,
+            startDate: format(startDate!, "yyyy-MM-dd"),
+            endDate: format(endDate!, "yyyy-MM-dd"),
             totalPrice,
-            deposit,
-          }),
+            customer: {
+                firstName: formData.firstName,
+                lastName: formData.lastName,
+                email: formData.email,
+                phone: formData.phone,
+            },
+        };
+
+        const response = await fetch('/api/bookings/capture-paypal-order', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ orderID: data.orderID, bookingDetails }),
         });
 
-        if (!emailResponse.ok) {
-          const errorData = await emailResponse.json();
-          console.warn("Email sending warning:", errorData);
+        const result = await response.json();
+
+        if (response.ok && result.success) {
+            toast({
+                title: "Booking Confirmed!",
+                description: "Your payment was successful and your booking is confirmed.",
+            });
+            setIsSuccess(true);
+        } else {
+            toast({
+                title: "Booking Failed",
+                description: result.details || "There was an error finalizing your booking after payment.",
+                variant: "destructive",
+            });
         }
-      } catch (emailError) {
-        console.error("Email sending error:", emailError);
-      }
-
-      // This would redirect to a checkout page with Stripe in a real app
-      toast({
-        title: "Booking initiated",
-        description: "You'll be redirected to complete your booking",
-      })
-
-      setIsSuccess(true)
     } catch (error) {
-      console.error("Booking error:", error)
-      toast({
-        title: "Booking failed",
-        description: "There was an error processing your booking. Please try again.",
-        variant: "destructive",
-      })
+        console.error("Booking error:", error);
+        toast({
+            title: "Booking failed",
+            description: "An unexpected error occurred. Please contact support.",
+            variant: "destructive",
+        });
     } finally {
-      setIsLoading(false)
+        setIsLoading(false);
     }
-  }
+  };
 
   useEffect(() => {
     import("@/lib/analytics/track-events").then(({ trackBookingStep }) => {
@@ -698,13 +695,26 @@ export function CarBookingForm({ carId, pricing, availability = [] }: BookingFor
                     ) : (
                       <span className="flex items-center">
                         <CreditCard className="mr-2 h-3 w-3" />
-                        Complete Booking
+                        Proceed to Payment
                       </span>
                     )}
                   </Button>
                 </motion.div>
               </div>
             </form>
+
+            {showPayPalButtons && (
+              <>
+                <Separator className="my-2" />
+                {isPending && <div className="text-center text-sm text-muted-foreground">Loading payment options...</div>}
+                <PayPalButtons
+                    style={{ layout: "vertical", color: "blue", shape: "rect", label: "pay" }}
+                    createOrder={createPayPalOrder}
+                    onApprove={onPayPalApprove}
+                    forceReRender={[totalPrice]} // Re-render buttons if the price changes
+                />
+              </>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
