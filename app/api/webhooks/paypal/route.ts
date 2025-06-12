@@ -64,6 +64,34 @@ async function verifyPayPalWebhook(
   try {
     const accessToken = await getPayPalAccessToken();
     
+    // Extract PayPal headers
+    const authAlgo = request.headers.get('paypal-auth-algo');
+    const certUrl = request.headers.get('paypal-cert-url');
+    const transmissionId = request.headers.get('paypal-transmission-id');
+    const transmissionSig = request.headers.get('paypal-transmission-sig');
+    const transmissionTime = request.headers.get('paypal-transmission-time');
+    
+    // Debug: Log headers for troubleshooting
+    console.log('PayPal webhook headers:', {
+      authAlgo,
+      certUrl,
+      transmissionId: transmissionId ? 'present' : 'missing',
+      transmissionSig: transmissionSig ? 'present' : 'missing',
+      transmissionTime,
+      allHeaders: Object.fromEntries(request.headers.entries())
+    });
+    
+    // Check if required headers are present
+    if (!authAlgo || !certUrl || !transmissionId || !transmissionSig || !transmissionTime) {
+      console.warn('Missing required PayPal webhook headers. This might be a test request or misconfigured webhook.');
+      // In development, allow missing headers for testing
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('Skipping webhook verification in development mode.');
+        return true;
+      }
+      return false;
+    }
+    
     const verificationResponse = await fetch(`${PAYPAL_API_BASE}/v1/notifications/verify-webhook-signature`, {
       method: 'POST',
       headers: {
@@ -71,11 +99,11 @@ async function verifyPayPalWebhook(
         'Authorization': `Bearer ${accessToken}`
       },
       body: JSON.stringify({
-        auth_algo: request.headers.get('paypal-auth-algo') || '',
-        cert_url: request.headers.get('paypal-cert-url') || '',
-        transmission_id: request.headers.get('paypal-transmission-id') || '',
-        transmission_sig: request.headers.get('paypal-transmission-sig') || '',
-        transmission_time: request.headers.get('paypal-transmission-time') || '',
+        auth_algo: authAlgo,
+        cert_url: certUrl,
+        transmission_id: transmissionId,
+        transmission_sig: transmissionSig,
+        transmission_time: transmissionTime,
         webhook_id: webhookId,
         webhook_event: JSON.parse(rawBody)
       })
