@@ -60,6 +60,7 @@
     "clsx": "^2.1.1",
     "cmdk": "1.0.4",
     "date-fns": "latest",
+    "dotenv": "16.5.0",
     "embla-carousel": "latest",
     "embla-carousel-autoplay": "latest",
     "embla-carousel-react": "latest",

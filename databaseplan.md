@@ -1,6 +1,6 @@
 # Database Plan for Exodrive Bookings Enhancement
 
-> Status: Proposed · Last updated {{DATE}}
+> Status: Implemented · Last updated December 13, 2024
 
 This document outlines the necessary database schema changes and enhancements to support the features detailed in `bookings.prd.md` and `booking.md`.
 

@@ -1,8 +1,8 @@
 # Redis Integration Strategy for Exodrive
 
-> **Status:** Draft · Last updated {{DATE}}
+> **Status:** Partially Implemented · Last updated December 13, 2024
 >
-> Redis will be introduced as a *multi-purpose edge cache & coordination layer* that complements Supabase Postgres. This document lists the concrete use-cases, expected performance gains, and operational considerations.
+> Redis has been introduced as a *multi-purpose edge cache & coordination layer* that complements Supabase Postgres. This document lists the concrete use-cases, expected performance gains, and operational considerations.
 
 ---
 

@@ -1,6 +1,6 @@
-# exoDrive - Exotic Car Rental Website
-lol
-This document provides an overview of the exoDrive project, a luxury and exotic car rental service. It covers setup, project structure, key features, and backend integration.
+# ExoDrive - Exotic Car Rental Platform
+
+This document provides an overview of the ExoDrive project, a luxury and exotic car rental service with comprehensive booking management, automated contracts, and payment processing.
 
 ## Table of Contents
 
@@ -25,22 +25,33 @@ exoDrive is a Next.js application designed to provide a modern, responsive inter
 ## Features
 
 - **Public Website**:
-  - Engaging homepage with featured cars and company information.
-  - Comprehensive fleet page with filtering and search capabilities.
-  - Detailed car pages showcasing specifications, images, and booking options.
-  - Contact page for customer inquiries.
-  - Instagram integration for direct rental requests.
+  - Engaging homepage with featured cars and company information
+  - Comprehensive fleet page with filtering and search capabilities
+  - Detailed car pages showcasing specifications, images, and booking options
+  - Complete booking flow with payment processing and contract automation
+  - Secure customer booking pages with real-time status updates
+  - Contact page for customer inquiries
 
 - **Admin Dashboard**:
-  - Secure login system for administrators.
-  - Dashboard overview (placeholder for key metrics).
-  - Full car management capabilities (add, edit, delete, hide/unhide).
-  - Booking management (placeholder for future implementation).
-  - Configuration for homepage settings and other site parameters.
+  - Secure login system for administrators
+  - Complete booking management system with status tracking
+  - Full car management capabilities (add, edit, delete, hide/unhide)
+  - Real-time booking timeline with event tracking
+  - PayPal payment processing and invoice management
+  - Automated contract generation and signing workflow
+  - Email notification system with delivery tracking
+  - Configuration for homepage settings and other site parameters
+
+- **Booking System**:
+  - Automated availability checking with Redis-based conflict prevention
+  - PayPal payment authorization and capture
+  - Automated contract generation via DocuSeal
+  - Real-time webhook processing for payment and contract events
+  - Comprehensive dispute management with evidence collection
 
 ## Tech Stack
 
-- **Framework**: Next.js 14 (App Router)
+- **Framework**: Next.js 15 (App Router)
 - **Package Manager**: Bun
 - **Styling**: Tailwind CSS with custom gradient utilities
 - **UI Components**: shadcn/ui
@@ -48,6 +59,10 @@ exoDrive is a Next.js application designed to provide a modern, responsive inter
 - **Authentication**: Supabase Auth (with email/password for admins)
 - **Database**: Supabase (PostgreSQL)
 - **Storage**: Supabase Storage (for car images, hero backgrounds)
+- **Payment Processing**: PayPal SDK for payments and invoicing
+- **Contract Management**: DocuSeal for automated rental agreements
+- **Caching**: Redis (Upstash) for distributed locking and performance
+- **Email Service**: Resend for transactional emails
 - **Icons**: Lucide React
 
 ## Getting Started

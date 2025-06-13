@@ -1,6 +1,6 @@
 # Bookings PRD – Exodrive
 
-> Status: Draft · Last updated {{DATE}}
+> Status: Implemented · Last updated December 13, 2024
 
 ---
 

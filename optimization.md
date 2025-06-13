@@ -1,7 +1,7 @@
 # Exodrive – Performance & Cost Optimisation Playbook
 
-> **Status:** Draft · Last updated {{DATE}}  
-> Synthesises insights from `graphql.md` and `redis.md`, then proposes further optimisations with estimated wins.
+> **Status:** Ready for Implementation · Last updated December 13, 2024  
+> Proposes performance optimizations and Redis-based improvements with estimated performance gains.
 
 ---
 
