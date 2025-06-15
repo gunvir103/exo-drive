@@ -1,6 +1,6 @@
 # Booking Solution – Technical Plan
 
-> **Status:** Implemented · Last updated December 13, 2024
+> **Status:** Implemented · Last updated June 2025
 > 
 > This document captures the architecture, data-model, and development plan for Exodrive's car-rental booking system. Most features outlined here have been implemented.
 
